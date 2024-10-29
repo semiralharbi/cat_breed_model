@@ -1,14 +1,16 @@
 import os
-
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras import layers, models, applications, callbacks
-from sklearn.preprocessing import LabelEncoder
-from sklearn.metrics import classification_report, confusion_matrix
+import keras_cv
 import matplotlib.pyplot as plt
 import splitfolders
 import itertools
+from tensorflow.keras import callbacks
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import classification_report, confusion_matrix
+from contextlib import redirect_stdout
 
+# Constants
 PATH = 'oxford-iiit-cats-extended-10k/CatBreedsRefined-v3'
 data_dir = 'cats_dataset'
 inputs_dir = 'inputs'
@@ -18,15 +20,17 @@ BATCH_SIZE = 32
 INPUT_SHAPE = IMAGE_SIZE + (3,)
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 
+EPOCHS = 20
+FINE_TUNE_EPOCHS = 20
+
 train_dir = 'data/train'
 validation_dir = 'data/val'
 
-data_augmentation = tf.keras.Sequential([
-    layers.RandomFlip('horizontal'),
-    layers.RandomFlip('vertical'),
-    layers.RandomRotation(0.2),
-    layers.RandomBrightness(0.2),
-    layers.RandomContrast(0.2)
+data_augmentation = keras_cv.layers.Augmenter([
+    keras_cv.layers.RandomRotation(0.05),  # Reduce rotation
+    keras_cv.layers.RandomFlip(mode="horizontal"),
+    keras_cv.layers.RandomZoom(height_factor=0.05, width_factor=0.05),
+    keras_cv.layers.RandomTranslation(height_factor=0.05, width_factor=0.05),
 ])
 
 
@@ -48,6 +52,7 @@ def preprocess_image(image_path, label):
     image = tf.image.decode_jpeg(image, channels=3)
     image = tf.image.resize(image, IMAGE_SIZE)
     image = image / 255.0
+    image = data_augmentation(image)
     return image, label
 
 
@@ -102,34 +107,32 @@ def preprocess_labels(labels):
 
 
 def create_model(num_classes):
-    rescale = layers.Rescaling(1. / 127.5, offset=-1)
-
-    base_model = applications.MobileNetV2(include_top=False, input_shape=INPUT_SHAPE, weights='imagenet')
+    base_model = tf.keras.applications.ResNet50(include_top=False, input_shape=INPUT_SHAPE, weights='imagenet')
     base_model.trainable = False
+    save_model_summary_to_file('BaseModel_ResNet50.txt', base_model)
 
-    model = models.Sequential([
-        layers.Input(shape=INPUT_SHAPE),
-        data_augmentation,
-        rescale,
-        base_model,
-        layers.BatchNormalization(),
-        layers.Conv2D(128, (3, 3), activation='relu'),
-        layers.MaxPooling2D(2, 2),
-        layers.Dropout(0.4),
-        layers.BatchNormalization(),
-        layers.GlobalAveragePooling2D(),
-        layers.Dense(256, activation='relu'),
-        layers.Dropout(0.2),
-        layers.BatchNormalization(),
-        layers.Dense(128, activation='relu'),
-        layers.BatchNormalization(),
-        layers.Dense(num_classes, activation='softmax'),
-    ])
+    x = base_model.output
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.Conv2D(128, (3, 3), activation='relu')(x)
+    x = tf.keras.layers.MaxPooling2D(2, 2)(x)
+    x = tf.keras.layers.Dropout(0.4)(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.GlobalAveragePooling2D()(x)
+    x = tf.keras.layers.Dense(256, activation='relu')(x)
+    x = tf.keras.layers.Dropout(0.2)(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.Dense(128, activation='relu')(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    outputs = tf.keras.layers.Dense(num_classes, activation='softmax')(x)
+
+    model = tf.keras.models.Model(inputs=base_model.input, outputs=outputs)
 
     model.summary()
+    print(f"Total number of layers are: {len(model.layers)}")
+    save_model_summary_to_file('Combined_model.txt', model)
 
-    model.compile(optimizer=tf.keras.optimizers.SGD(learning_rate=1e-3, momentum=0.9),
-                  loss='sparse_categorical_crossentropy',
+    model.compile(optimizer=tf.keras.optimizers.Adam(1e-4),
+                  loss='categorical_crossentropy',
                   metrics=['accuracy'])
     return model
 
@@ -137,20 +140,26 @@ def create_model(num_classes):
 def fine_tune_model(model):
     model.trainable = True
 
-    fine_tune_di = 100
+    fine_tune_at = 100
 
-    for layer in model.layers[:fine_tune_di]:
+    for layer in model.layers[:fine_tune_at]:
         layer.trainable = False
 
     model.summary()
 
     model.compile(optimizer=tf.keras.optimizers.Adam(1e-5),
-                  loss='sparse_categorical_crossentropy',
+                  loss='categorical_crossentropy',
                   metrics=['accuracy'])
     return model
 
 
-def train_and_evaluate(model, train_dataset, test_dataset, label_encoder, epochs=20, fine_tune_epochs=10):
+def save_model_summary_to_file(filename, model):
+    with open(filename, 'w') as f:
+        with redirect_stdout(f):
+            model.summary()
+
+
+def train_and_evaluate(model, train_dataset, test_dataset, label_encoder, epochs, fine_tune_epochs):
     lr_scheduler = callbacks.ReduceLROnPlateau(
         monitor="val_accuracy",
         factor=0.7,
@@ -222,7 +231,7 @@ def evaluate_model(model, dataset, label_encoder):
 
     for images, labels in dataset:
         predictions = model.predict(images)
-        y_true.extend(labels.numpy())
+        y_true.extend(np.argmax(labels.numpy(), axis=1))
         y_pred.extend(np.argmax(predictions, axis=1))
 
     y_true = np.array(y_true)
@@ -292,7 +301,7 @@ def main():
         shuffle=True,
         batch_size=BATCH_SIZE,
         image_size=IMAGE_SIZE,
-        label_mode='int'
+        label_mode='categorical'
     )
     train_dataset = train_dataset.prefetch(buffer_size=AUTOTUNE)
 
@@ -301,7 +310,7 @@ def main():
         shuffle=True,
         batch_size=BATCH_SIZE,
         image_size=IMAGE_SIZE,
-        label_mode='int'
+        label_mode='categorical'
     )
     test_dataset = test_dataset.prefetch(buffer_size=AUTOTUNE)
 
@@ -326,7 +335,7 @@ def main():
         print("Loaded saved model.")
     else:
         model = create_model(num_classes)
-        train_and_evaluate(model, train_dataset, test_dataset, label_encoder, epochs=200, fine_tune_epochs=100)
+        train_and_evaluate(model, train_dataset, test_dataset, label_encoder, epochs=EPOCHS, fine_tune_epochs=FINE_TUNE_EPOCHS)
 
     model.save(saved_model_path)
 

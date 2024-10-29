@@ -98,9 +98,9 @@ pip install tensorflow numpy scikit-learn matplotlib split-folders
 
 ![Augmentation](scrn/augmentation.png)
 
-- **Training Process**:
+- **Training Process - 200 Epochs**:
 
-![Training Process]
+![Training Process](scrn/training_acc_loss.png)
 
 - **Classification Report**:
 
@@ -108,7 +108,7 @@ pip install tensorflow numpy scikit-learn matplotlib split-folders
 
 - **Confusion Matrix**:
 
-![Confusion Matrix]
+![Confusion Matrix](scrn/conf_matrix.png)
 
 - **Results & Confidence**:
 
